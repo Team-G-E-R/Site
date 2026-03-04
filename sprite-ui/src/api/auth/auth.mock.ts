@@ -46,6 +46,7 @@ function uid() {
 }
 
 export function createMockAuthApi() {
+  console.log("Create IMPL in Mock mode");
   return {
     async register(email: string, password: string, name: string): Promise<Me> {
       email = normEmail(email);

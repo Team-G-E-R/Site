@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
+import { apiCreateJob, apiGetJob } from './api/jobs';
 
 type Category = "Character" | "Building" | "Creature" | "Prop";
 
@@ -24,6 +25,75 @@ export default function SpriteSheetUI() {
 
   const frames = useMemo(() => Array.from({ length: frameCount }, (_, i) => i), [frameCount]);
   const animTimer = useRef<number | null>(null);
+
+  const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
+
+  // async function waitJob(jobId: string, opts?: { timeoutMs?: number; intervalMs?: number }) {
+  //   const timeoutMs = opts?.timeoutMs ?? 120_000;
+  //   const intervalMs = opts?.intervalMs ?? 700;
+
+  //   const t0 = Date.now();
+  //   while (true) {
+  //     const j = await apiGetJob(jobId);
+
+  //     if (j.status === "succeeded") return j;
+  //     if (j.status === "failed") throw new Error(j.error || "Job failed");
+
+  //     if (Date.now() - t0 > timeoutMs) throw new Error("Job timeout");
+  //     await sleep(intervalMs);
+  //   }
+  // }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function waitJob(jobId: string) {
+  for (let i = 0; i < 300; i++) { // ~3.5 минуты при 700ms
+    const j = await apiGetJob(jobId);
+    if (j.status === "failed") throw new Error(j.error ?? "Generation failed");
+    if (j.status === "succeeded") return j;
+    await sleep(700);
+  }
+  throw new Error("Timeout waiting for job");
+}
+
+const onGenerate = async () => {
+  setGenError(null);
+  setIsGenerating(true);
+
+  // прибираем старый objectURL
+  setResultUrl((prev) => {
+    if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
+    return prev;
+  });
+
+  try {
+    const created = await apiCreateJob({
+      type: "sprites",
+      params: { prompt, size: size.w },
+    });
+
+    const jobId = String(created.job_id);
+    const done = await waitJob(jobId);
+
+    const imageRel = done.result?.artifacts?.image; // "out/result.png"
+    if (!imageRel) throw new Error("No image artifact");
+
+    const res = await fetch(`/api/jobs/${jobId}/artifact/${imageRel}`, {
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error(`Image fetch failed: ${res.status}`);
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    setResultUrl(url);
+  } catch (e) {
+    setGenError(e instanceof Error ? e.message : String(e));
+  } finally {
+    setIsGenerating(false);
+  }
+};
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -52,80 +122,153 @@ export default function SpriteSheetUI() {
   }, [isPlaying, fps, frameCount, isLoop]);
 
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+const resultImgRef = useRef<HTMLImageElement | null>(null);
 
-  useEffect(() => {
+function getFrameRect(
+  imgW: number,
+  imgH: number,
+  frameW: number,
+  frameH: number,
+  frameCount: number,
+  frameIndex: number
+) {
+  // single frame
+  if (imgW === frameW && imgH === frameH) {
+    return { sx: 0, sy: 0, sw: frameW, sh: frameH };
+  }
+
+  // horizontal strip: W = frameW * frameCount, H = frameH
+  if (imgH === frameH && imgW === frameW * frameCount) {
+    const sx = frameIndex * frameW;
+    return { sx, sy: 0, sw: frameW, sh: frameH };
+  }
+
+  // grid fallback
+  const cols = Math.max(1, Math.floor(imgW / frameW));
+  const rows = Math.max(1, Math.floor(imgH / frameH));
+  const maxFrames = cols * rows;
+
+  const i = ((frameIndex % maxFrames) + maxFrames) % maxFrames;
+  const c = i % cols;
+  const r = Math.floor(i / cols);
+
+  return { sx: c * frameW, sy: r * frameH, sw: frameW, sh: frameH };
+}
+
+// грузим картинку, когда обновился resultUrl
+useEffect(() => {
+  resultImgRef.current = null;
+  if (!resultUrl) return;
+
+  let cancelled = false;
+  const img = new Image();
+  img.onload = () => {
+    if (cancelled) return;
+    resultImgRef.current = img;
+
+    // сразу перерисуем
     const el = previewCanvasRef.current;
     if (!el) return;
     const ctx = el.getContext("2d");
     if (!ctx) return;
+
     const { w, h } = size;
     el.width = w;
     el.height = h;
-    ctx.clearRect(0, 0, w, h);
     ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, w, h);
 
     if (!removeBg) {
       ctx.fillStyle = "#0b0e13";
       ctx.fillRect(0, 0, w, h);
     }
 
-    // simple "placeholder art" (different by category)
-    const px = category === "Building" ? 10 : category === "Prop" ? 7 : 8;
-    const palette =
-      category === "Character" ? ["#f472b6", "#fb7185", "#a78bfa", "#38bdf8", "#22c55e"]
-      : category === "Building" ? ["#a3a3a3", "#737373", "#c084fc", "#f59e0b", "#60a5fa"]
-      : category === "Creature" ? ["#22c55e", "#86efac", "#34d399", "#10b981", "#14b8a6"]
-      : ["#f59e0b", "#f97316", "#fb7185", "#38bdf8", "#a3a3a3"];
-
-    for (let y = 0; y < h; y += px) {
-      for (let x = 0; x < w; x += px) {
-        const k = ((x + y + currentFrame * 5) / px) % palette.length;
-        // @ts-ignore
-        ctx.fillStyle = palette[Math.floor(k)];
-        if (removeBg && (x < px || y < px || x > w - px * 2 || y > h - px * 2)) continue;
-        ctx.fillRect(x + (currentFrame % 3), y + ((currentFrame * 2) % 3), px - 1, px - 1);
-      }
-    }
+    const fr = getFrameRect(img.width, img.height, w, h, frameCount, currentFrame);
+    ctx.drawImage(img, fr.sx, fr.sy, fr.sw, fr.sh, 0, 0, w, h);
 
     ctx.strokeStyle = "#2e2e2e";
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-  }, [size, currentFrame, removeBg, category]);
-
-  const makeSpriteSheet = () => {
-    const { w, h } = size;
-    const cols = Math.min(frameCount, 6);
-    const rows = Math.ceil(frameCount / cols);
-    const sheet = document.createElement("canvas");
-    sheet.width = cols * w;
-    sheet.height = rows * h;
-    const sctx = sheet.getContext("2d");
-    if (!sctx) return null;
-    sctx.imageSmoothingEnabled = false;
-    const tmp = previewCanvasRef.current;
-    if (!tmp) return null;
-    for (let i = 0; i < frameCount; i++) {
-      setCurrentFrame(i);
-      const r = Math.floor(i / cols);
-      const c = i % cols;
-      const ctx = tmp.getContext("2d");
-      if (ctx) sctx.drawImage(tmp, c * w, r * h);
-    }
-    return sheet;
   };
+
+  // важно: для blob: URL проблем обычно нет
+  img.src = resultUrl;
+
+  return () => {
+    cancelled = true;
+  };
+}, [resultUrl]); // только загрузка
+
+// перерисовка кадра при смене currentFrame/size/removeBg (картинка уже загружена)
+useEffect(() => {
+  const el = previewCanvasRef.current;
+  const img = resultImgRef.current;
+  if (!el) return;
+  const ctx = el.getContext("2d");
+  if (!ctx) return;
+
+  const { w, h } = size;
+  el.width = w;
+  el.height = h;
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!removeBg) {
+    ctx.fillStyle = "#0b0e13";
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  if (img) {
+    const fr = getFrameRect(img.width, img.height, w, h, frameCount, currentFrame);
+    ctx.drawImage(img, fr.sx, fr.sy, fr.sw, fr.sh, 0, 0, w, h);
+  } else {
+    // если результата ещё нет — можно оставить пустым или твой старый placeholder
+    // (я оставил пустым)
+  }
+
+  ctx.strokeStyle = "#2e2e2e";
+  ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+}, [size, currentFrame, removeBg, frameCount]);
 
   const downloadSpriteSheet = () => {
-    const sheet = makeSpriteSheet();
-    if (!sheet) return;
-    sheet.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "sprite-sheet.png";
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-  };
+  const sheet = makeSpriteSheet();
+  if (!sheet) return;
+  sheet.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "sprite-sheet.png";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+};
+
+  const makeSpriteSheet = () => {
+  const img = resultImgRef.current;
+  if (!img) return null;
+
+  const { w, h } = size;
+  const cols = Math.min(frameCount, 6);
+  const rows = Math.ceil(frameCount / cols);
+
+  const sheet = document.createElement("canvas");
+  sheet.width = cols * w;
+  sheet.height = rows * h;
+
+  const sctx = sheet.getContext("2d");
+  if (!sctx) return null;
+  sctx.imageSmoothingEnabled = false;
+
+  for (let i = 0; i < frameCount; i++) {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+
+    const fr = getFrameRect(img.width, img.height, w, h, frameCount, i);
+    sctx.drawImage(img, fr.sx, fr.sy, fr.sw, fr.sh, c * w, r * h, w, h);
+  }
+
+  return sheet;
+};
 
   const copyCss = async () => {
     const steps = frameCount;
@@ -228,10 +371,11 @@ export default function SpriteSheetUI() {
           </div>
 
           <button
-            onClick={() => setIsPlaying(true)}
-            className="mt-6 w-full h-11 rounded-xl bg-pink-600/80 hover:bg-pink-500 transition text-white font-medium tracking-wide"
+            onClick={onGenerate}
+            disabled={isGenerating}
+            className="mt-6 w-full h-11 rounded-xl bg-pink-600/80 hover:bg-pink-500 disabled:opacity-50 transition text-white font-medium tracking-wide"
           >
-            GENERATE
+            {isGenerating ? "GENERATING..." : "GENERATE"}
           </button>
 
           <div className="text-white/40 text-xs mt-3">MVP: UI only (no AI yet)</div>
