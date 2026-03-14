@@ -1,0 +1,16 @@
+SpriteGen — урезанная версия: Image/Text/Audio
+
+Запуск:
+- start-front.bat
+- Открыть: http://localhost:5173
+
+Проверка:
+1) Image mode (по умолчанию):
+   - Слева нет выбора количества кадров.
+   - Справа только кнопки Play/Loop/Reset/Remove Background + превью.
+2) Mode -> Text:
+   - Слева снизу только Words count.
+   - GENERATE -> справа текст + Download TXT.
+3) Mode -> Audio:
+   - Слева снизу ползунок длины (1..10 сек).
+   - GENERATE -> справа плеер + Loop/Restart/Download WAV.
