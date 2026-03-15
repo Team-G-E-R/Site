@@ -5,12 +5,14 @@ import { createHttpAuthApi } from './auth.http';
 export type { Me, AuthBackendMode } from './types';
 
 export function getBackendMode(): AuthBackendMode {
-  const v = (import.meta.env.VITE_BACKEND || 'mock') as AuthBackendMode;
+  const v = (import.meta.env.VITE_BACKEND ?? 'mock') as AuthBackendMode;
   return v === 'http' ? 'http' : 'mock';
 }
 
 export function getApiBase(): string {
-  return (import.meta.env.VITE_API_BASE || 'http://localhost:4000') as string;
+  const v = import.meta.env.VITE_API_BASE;
+  // "" - valid
+  return (v === undefined ? '' : String(v));
 }
 
 const mode = getBackendMode();

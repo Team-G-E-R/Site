@@ -1,0 +1,6 @@
+sprite-ui/node_modules/
+dist/
+build/
+.vite/
+*.log
+.DS_Store
