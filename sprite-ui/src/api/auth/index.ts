@@ -20,7 +20,7 @@ const httpBase = getApiBase();
 const impl = mode === 'http' ? createHttpAuthApi(httpBase) : createMockAuthApi();
 
 export async function apiRegister(email: string, password: string, name: string): Promise<Me> {
-  // @ts-ignore - mock/http share method names
+  // @ts-ignore
   return impl.register(email, password, name);
 }
 
@@ -40,7 +40,6 @@ export async function apiMe(): Promise<Me | null> {
 }
 
 export async function apiListUsers(): Promise<Me[]> {
-  // only exists in mock
   // @ts-ignore
   if (typeof impl.listUsers === 'function') return impl.listUsers();
   return [];

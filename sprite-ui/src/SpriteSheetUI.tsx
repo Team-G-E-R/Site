@@ -2,171 +2,158 @@ import React, { useMemo, useRef, useState, useEffect } from "react";
 import { apiCreateJob, apiGetJob } from './api/jobs';
 
 type Category = "Character" | "Building" | "Creature" | "Prop";
+type GenMode = "image" | "text" | "audio";
+
+function modeLabel(m: GenMode) {
+  if (m === "text") return "Text";
+  if (m === "audio") return "Audio";
+  return "Image";
+}
+
+function modeTitle(m: GenMode) {
+  if (m === "text") return "Generate a text about...";
+  if (m === "audio") return "Generate an audio about...";
+  return "Generate an image about...";
+}
+
+function modePlaceholder(m: GenMode) {
+  if (m === "text") return "Например: короткое описание персонажа, лор, квест, диалоги...";
+  if (m === "audio") return "Например: удар меча, шаги, амбиент, музыкальный луп...";
+  return "Например: knight run cycle, 16-bit, clean outlines";
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function makeTxtFile(text: string): Blob {
+  return new Blob([text], { type: "text/plain;charset=utf-8" });
+}
+
+function generateLoremWords(count: number) {
+  const base = [
+    "sprite", "pixel", "hero", "village", "quest", "shadow", "castle", "forest", "magic", "iron",
+    "river", "ancient", "guardian", "silent", "storm", "gold", "path", "dream", "echo", "light"
+  ];
+  const words: string[] = [];
+  for (let i = 0; i < count; i++) words.push(base[i % base.length]);
+  const text = words.join(" ");
+  return text.charAt(0).toUpperCase() + text.slice(1) + ".";
+}
+
+function generateTestWav(seconds = 2.0, freq = 440): Blob {
+  const sampleRate = 44100;
+  const numSamples = Math.floor(sampleRate * seconds);
+  const numChannels = 1;
+  const bitsPerSample = 16;
+
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+
+  const writeString = (offset: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeString(8, "WAVE");
+
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
+  view.setUint16(32, numChannels * (bitsPerSample / 8), true);
+  view.setUint16(34, bitsPerSample, true);
+
+  writeString(36, "data");
+  view.setUint32(40, numSamples * 2, true);
+
+  const volume = 0.25;
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    const s = Math.sin(2 * Math.PI * freq * t) * volume;
+    const v = Math.max(-1, Math.min(1, s));
+    view.setInt16(44 + i * 2, Math.floor(v * 32767), true);
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
 
 export default function SpriteSheetUI() {
+  const [mode, setMode] = useState<GenMode>("image");
+  const [modeOpen, setModeOpen] = useState(false);
+
   const [prompt, setPrompt] = useState("");
   const [file, setFile] = useState<File | null>(null);
 
   const [category, setCategory] = useState<Category>("Character");
-  const [frameCount, setFrameCount] = useState(9);
   const [style, setStyle] = useState("Pixel Art");
   const [canvasSize, setCanvasSize] = useState("128x128");
-
-  const [fps, setFps] = useState(10);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isLoop, setIsLoop] = useState(true);
-  const [currentFrame, setCurrentFrame] = useState(0);
   const [removeBg, setRemoveBg] = useState(false);
+
+  const [wordCount, setWordCount] = useState(80);
+  const [textOut, setTextOut] = useState<string>(
+    "Нажми GENERATE, чтобы получить тестовый результат текста."
+  );
+
+  const [audioSeconds, setAudioSeconds] = useState(2);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [isLoop, setIsLoop] = useState(true);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const size = useMemo(() => {
     const [w, h] = canvasSize.split("x").map(Number);
     return { w, h };
   }, [canvasSize]);
 
-  const frames = useMemo(() => Array.from({ length: frameCount }, (_, i) => i), [frameCount]);
-  const animTimer = useRef<number | null>(null);
-
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
 
-  // async function waitJob(jobId: string, opts?: { timeoutMs?: number; intervalMs?: number }) {
-  //   const timeoutMs = opts?.timeoutMs ?? 120_000;
-  //   const intervalMs = opts?.intervalMs ?? 700;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  //   const t0 = Date.now();
-  //   while (true) {
-  //     const j = await apiGetJob(jobId);
-
-  //     if (j.status === "succeeded") return j;
-  //     if (j.status === "failed") throw new Error(j.error || "Job failed");
-
-  //     if (Date.now() - t0 > timeoutMs) throw new Error("Job timeout");
-  //     await sleep(intervalMs);
-  //   }
-  // }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function waitJob(jobId: string) {
-  for (let i = 0; i < 300; i++) { // ~3.5 минуты при 700ms
-    const j = await apiGetJob(jobId);
-    if (j.status === "failed") throw new Error(j.error ?? "Generation failed");
-    if (j.status === "succeeded") return j;
-    await sleep(700);
+  async function waitJob(jobId: string) {
+    for (let i = 0; i < 300; i++) {
+      const j = await apiGetJob(jobId);
+      if (j.status === "failed") throw new Error(j.error ?? "Generation failed");
+      if (j.status === "succeeded") return j;
+      await sleep(700);
+    }
+    throw new Error("Timeout waiting for job");
   }
-  throw new Error("Timeout waiting for job");
-}
-
-const onGenerate = async () => {
-  setGenError(null);
-  setIsGenerating(true);
-
-  // прибираем старый objectURL
-  setResultUrl((prev) => {
-    if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
-    return prev;
-  });
-
-  try {
-    const created = await apiCreateJob({
-      type: "sprites",
-      params: { prompt, size: size.w },
-    });
-
-    const jobId = String(created.job_id);
-    const done = await waitJob(jobId);
-
-    const imageRel = done.result?.artifacts?.image; // "out/result.png"
-    if (!imageRel) throw new Error("No image artifact");
-
-    const res = await fetch(`/api/jobs/${jobId}/artifact/${imageRel}`, {
-      credentials: "include",
-    });
-    if (!res.ok) throw new Error(`Image fetch failed: ${res.status}`);
-
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    setResultUrl(url);
-  } catch (e) {
-    setGenError(e instanceof Error ? e.message : String(e));
-  } finally {
-    setIsGenerating(false);
-  }
-};
-
-  useEffect(() => {
-    if (!isPlaying) return;
-    if (animTimer.current) cancelAnimationFrame(animTimer.current);
-    let acc = 0;
-    let last = performance.now();
-    const frameDur = 1000 / fps;
-    const tick = (t: number) => {
-      acc += t - last;
-      last = t;
-      while (acc >= frameDur) {
-        setCurrentFrame((f) => {
-          const nf = f + 1;
-          if (nf >= frameCount) return isLoop ? 0 : (setIsPlaying(false), frameCount - 1);
-          return nf;
-        });
-        acc -= frameDur;
-      }
-      if (isPlaying) animTimer.current = requestAnimationFrame(tick);
-    };
-    animTimer.current = requestAnimationFrame(tick);
-    return () => {
-      if (animTimer.current) cancelAnimationFrame(animTimer.current);
-      animTimer.current = null;
-    };
-  }, [isPlaying, fps, frameCount, isLoop]);
 
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
-const resultImgRef = useRef<HTMLImageElement | null>(null);
+  const resultImgRef = useRef<HTMLImageElement | null>(null);
 
-function getFrameRect(
-  imgW: number,
-  imgH: number,
-  frameW: number,
-  frameH: number,
-  frameCount: number,
-  frameIndex: number
-) {
-  // single frame
-  if (imgW === frameW && imgH === frameH) {
-    return { sx: 0, sy: 0, sw: frameW, sh: frameH };
-  }
+  const drawImagePlaceholder = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    const px = category === "Building" ? 10 : category === "Prop" ? 7 : 8;
+    const palette =
+      category === "Character"
+        ? ["#f472b6", "#fb7185", "#a78bfa", "#38bdf8", "#22c55e"]
+        : category === "Building"
+        ? ["#a3a3a3", "#737373", "#c084fc", "#f59e0b", "#60a5fa"]
+        : category === "Creature"
+        ? ["#22c55e", "#86efac", "#34d399", "#10b981", "#14b8a6"]
+        : ["#f59e0b", "#f97316", "#fb7185", "#38bdf8", "#a3a3a3"];
 
-  // horizontal strip: W = frameW * frameCount, H = frameH
-  if (imgH === frameH && imgW === frameW * frameCount) {
-    const sx = frameIndex * frameW;
-    return { sx, sy: 0, sw: frameW, sh: frameH };
-  }
+    for (let y = 0; y < h; y += px) {
+      for (let x = 0; x < w; x += px) {
+        const k = ((x + y) / px) % palette.length;
+        ctx.fillStyle = palette[Math.floor(k)];
+        if (removeBg && (x < px || y < px || x > w - px * 2 || y > h - px * 2)) continue;
+        ctx.fillRect(x, y, px - 1, px - 1);
+      }
+    }
+  };
 
-  // grid fallback
-  const cols = Math.max(1, Math.floor(imgW / frameW));
-  const rows = Math.max(1, Math.floor(imgH / frameH));
-  const maxFrames = cols * rows;
-
-  const i = ((frameIndex % maxFrames) + maxFrames) % maxFrames;
-  const c = i % cols;
-  const r = Math.floor(i / cols);
-
-  return { sx: c * frameW, sy: r * frameH, sw: frameW, sh: frameH };
-}
-
-// грузим картинку, когда обновился resultUrl
-useEffect(() => {
-  resultImgRef.current = null;
-  if (!resultUrl) return;
-
-  let cancelled = false;
-  const img = new Image();
-  img.onload = () => {
-    if (cancelled) return;
-    resultImgRef.current = img;
-
-    // сразу перерисуем
+  const redrawPreview = () => {
     const el = previewCanvasRef.current;
     if (!el) return;
     const ctx = el.getContext("2d");
@@ -183,192 +170,328 @@ useEffect(() => {
       ctx.fillRect(0, 0, w, h);
     }
 
-    const fr = getFrameRect(img.width, img.height, w, h, frameCount, currentFrame);
-    ctx.drawImage(img, fr.sx, fr.sy, fr.sw, fr.sh, 0, 0, w, h);
+    const img = resultImgRef.current;
+    if (img) {
+      ctx.drawImage(img, 0, 0, w, h);
+    } else {
+      drawImagePlaceholder(ctx, w, h);
+    }
 
     ctx.strokeStyle = "#2e2e2e";
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
   };
 
-  // важно: для blob: URL проблем обычно нет
-  img.src = resultUrl;
+  useEffect(() => {
+    redrawPreview();
+  }, [size, removeBg, category, resultUrl]);
 
-  return () => {
-    cancelled = true;
-  };
-}, [resultUrl]); // только загрузка
+  useEffect(() => {
+    resultImgRef.current = null;
+    if (!resultUrl) {
+      redrawPreview();
+      return;
+    }
 
-// перерисовка кадра при смене currentFrame/size/removeBg (картинка уже загружена)
-useEffect(() => {
-  const el = previewCanvasRef.current;
-  const img = resultImgRef.current;
-  if (!el) return;
-  const ctx = el.getContext("2d");
-  if (!ctx) return;
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      resultImgRef.current = img;
+      redrawPreview();
+    };
+    img.src = resultUrl;
 
-  const { w, h } = size;
-  el.width = w;
-  el.height = h;
-  ctx.imageSmoothingEnabled = false;
-  ctx.clearRect(0, 0, w, h);
+    return () => {
+      cancelled = true;
+    };
+  }, [resultUrl]);
 
-  if (!removeBg) {
-    ctx.fillStyle = "#0b0e13";
-    ctx.fillRect(0, 0, w, h);
-  }
+  const onGenerate = async () => {
+    if (mode === "text") {
+      const text = generateLoremWords(wordCount);
+      const block = [
+        "MODE: TEXT",
+        `Words: ${wordCount}`,
+        "",
+        `Prompt: ${prompt || "(empty)"}`,
+        "",
+        "Result:",
+        text,
+      ].join("\n");
+      setTextOut(block);
+      return;
+    }
 
-  if (img) {
-    const fr = getFrameRect(img.width, img.height, w, h, frameCount, currentFrame);
-    ctx.drawImage(img, fr.sx, fr.sy, fr.sw, fr.sh, 0, 0, w, h);
-  } else {
-    // если результата ещё нет — можно оставить пустым или твой старый placeholder
-    // (я оставил пустым)
-  }
+    if (mode === "audio") {
+      const wav = generateTestWav(audioSeconds, 440);
+      const url = URL.createObjectURL(wav);
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      setAudioUrl(url);
+      setTimeout(() => {
+        const a = audioRef.current;
+        if (a) {
+          a.currentTime = 0;
+          a.loop = isLoop;
+          a.play().catch(() => {});
+        }
+      }, 0);
+      return;
+    }
 
-  ctx.strokeStyle = "#2e2e2e";
-  ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-}, [size, currentFrame, removeBg, frameCount]);
+    setGenError(null);
+    setIsGenerating(true);
 
-  const downloadSpriteSheet = () => {
-  const sheet = makeSpriteSheet();
-  if (!sheet) return;
-  sheet.toBlob((blob) => {
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "sprite-sheet.png";
-    a.click();
-    URL.revokeObjectURL(url);
-  });
-};
+    setResultUrl((prev) => {
+      if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
+      return null;
+    });
+    resultImgRef.current = null;
 
-  const makeSpriteSheet = () => {
-  const img = resultImgRef.current;
-  if (!img) return null;
-
-  const { w, h } = size;
-  const cols = Math.min(frameCount, 6);
-  const rows = Math.ceil(frameCount / cols);
-
-  const sheet = document.createElement("canvas");
-  sheet.width = cols * w;
-  sheet.height = rows * h;
-
-  const sctx = sheet.getContext("2d");
-  if (!sctx) return null;
-  sctx.imageSmoothingEnabled = false;
-
-  for (let i = 0; i < frameCount; i++) {
-    const r = Math.floor(i / cols);
-    const c = i % cols;
-
-    const fr = getFrameRect(img.width, img.height, w, h, frameCount, i);
-    sctx.drawImage(img, fr.sx, fr.sy, fr.sw, fr.sh, c * w, r * h, w, h);
-  }
-
-  return sheet;
-};
-
-  const copyCss = async () => {
-    const steps = frameCount;
-    const css = `@keyframes sprite-run {\n  from { background-position: 0 0; }\n  to { background-position: -${steps - 1}00% 0; }\n}\n.sprite {\n  width: ${size.w}px;\n  height: ${size.h}px;\n  background-image: url(sprite-sheet.png);\n  background-size: ${steps}00% 100%;\n  animation: sprite-run ${((steps / fps)).toFixed(2)}s steps(${steps}) infinite;\n}`;
     try {
-      await navigator.clipboard.writeText(css);
-      alert("CSS скопирован в буфер обмена");
-    } catch {}
+      const created = await apiCreateJob({
+        type: "sprites",
+        params: { prompt, size: size.w },
+      });
+
+      const jobId = String(created.job_id);
+      const done = await waitJob(jobId);
+
+      const imageRel = done.result?.artifacts?.image;
+      if (!imageRel) throw new Error("No image artifact");
+
+      const res = await fetch(`/api/jobs/${jobId}/artifact/${imageRel}`, {
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(`Image fetch failed: ${res.status}`);
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setResultUrl(url);
+    } catch (e) {
+      setGenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const downloadImage = () => {
+    const el = previewCanvasRef.current;
+    if (!el) return;
+    el.toBlob((blob) => {
+      if (!blob) return;
+      downloadBlob(blob, "image.png");
+    });
+  };
+
+  const downloadText = () => downloadBlob(makeTxtFile(textOut), "result.txt");
+
+  const audioPlayPause = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) a.play().catch(() => {});
+    else a.pause();
+  };
+
+  const audioRestart = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    a.currentTime = 0;
+    a.play().catch(() => {});
+  };
+
+  const audioDownload = async () => {
+    if (!audioUrl) return;
+    const res = await fetch(audioUrl);
+    const blob = await res.blob();
+    downloadBlob(blob, "test.wav");
+  };
+
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+    a.loop = isLoop;
+  }, [isLoop, audioUrl]);
+
+  useEffect(() => {
+    if (!modeOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (t.closest("[data-mode-menu]")) return;
+      setModeOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [modeOpen]);
+
+  const switchMode = (m: GenMode) => {
+    setMode(m);
+    setModeOpen(false);
+
+    if (m !== "audio" && audioUrl) {
+      URL.revokeObjectURL(audioUrl);
+      setAudioUrl(null);
+    }
   };
 
   return (
     <div className="min-h-screen w-full bg-[#0b0e13] text-white flex items-stretch justify-center p-4 md:p-8">
       <div className="w-full max-w-none grid grid-cols-1 md:grid-cols-2 gap-8">
         <div className="bg-[#0f131a] rounded-2xl p-6 border border-white/5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset,0_10px_30px_rgba(0,0,0,0.6)]">
-          <div className="flex items-center gap-2 text-pink-300 mb-3">
-            <SparklesIcon />
-            <span className="tracking-wide">Generate a pixel animation about...</span>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-pink-300">
+              <SparklesIcon />
+              <span className="tracking-wide">{modeTitle(mode)}</span>
+            </div>
+
+            <div className="relative" data-mode-menu>
+              <button
+                className="chip"
+                onClick={() => setModeOpen((v) => !v)}
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={modeOpen}
+              >
+                Mode: {modeLabel(mode)} ▾
+              </button>
+
+              {modeOpen && (
+                <div className="absolute right-0 mt-2 w-56 rounded-xl border border-white/10 bg-[#0b0e13] shadow-[0_10px_30px_rgba(0,0,0,0.6)] overflow-hidden">
+                  <button
+                    className={"w-full text-left px-3 py-2 hover:bg-white/10 " + (mode === "image" ? "text-pink-300" : "text-white/85")}
+                    onClick={() => switchMode("image")}
+                    type="button"
+                  >
+                    Image
+                    <div className="text-[11px] text-white/50 mt-0.5">Pixel image / sprites preview</div>
+                  </button>
+                  <button
+                    className={"w-full text-left px-3 py-2 hover:bg-white/10 " + (mode === "text" ? "text-pink-300" : "text-white/85")}
+                    onClick={() => switchMode("text")}
+                    type="button"
+                  >
+                    Text
+                    <div className="text-[11px] text-white/50 mt-0.5">Generate text + download TXT</div>
+                  </button>
+                  <button
+                    className={"w-full text-left px-3 py-2 hover:bg-white/10 " + (mode === "audio" ? "text-pink-300" : "text-white/85")}
+                    onClick={() => switchMode("audio")}
+                    type="button"
+                  >
+                    Audio
+                    <div className="text-[11px] text-white/50 mt-0.5">Generate audio + download WAV</div>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Например: knight run cycle, 16-bit, clean outlines"
+            placeholder={modePlaceholder(mode)}
             className="w-full h-28 rounded-xl bg-[#0b0e13] border border-white/10 p-4 outline-none focus:border-pink-500/70 placeholder:text-white/40"
           />
 
-          <div className="mt-4">
-            <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-white/20 rounded-xl py-8 cursor-pointer bg-[#0b0e13] hover:border-pink-400/40 transition">
-              <input
-                type="file"
-                accept="image/png,image/jpeg"
-                className="hidden"
-                onChange={(e) => setFile(e.target.files?.item(0) ?? null)}
-              />
-              <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center">
-                <UploadIcon />
+          {mode === "image" && (
+            <div className="mt-4">
+              <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-white/20 rounded-xl py-8 cursor-pointer bg-[#0b0e13] hover:border-pink-400/40 transition">
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  className="hidden"
+                  onChange={(e) => setFile(e.target.files?.item(0) ?? null)}
+                />
+                <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center">
+                  <UploadIcon />
+                </div>
+                <div className="text-white/80 text-sm">Click to upload a reference image</div>
+                <div className="text-white/40 text-xs">PNG, JPG up to 10MB</div>
+                {file && <div className="text-xs text-white/60 mt-1">{file.name}</div>}
+              </label>
+            </div>
+          )}
+
+          {mode === "image" && (
+            <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field label="Category">
+                <select
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value as Category)}
+                  className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
+                >
+                  {["Character", "Building", "Creature", "Prop"].map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field label="Style">
+                <select
+                  value={style}
+                  onChange={(e) => setStyle(e.target.value)}
+                  className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
+                >
+                  {["Pixel Art", "Game Boy", "PICO-8", "SNES"].map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field label="Canvas Size">
+                <select
+                  value={canvasSize}
+                  onChange={(e) => setCanvasSize(e.target.value)}
+                  className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
+                >
+                  {["64x64", "96x96", "128x128", "256x256"].map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          )}
+
+          {mode === "text" && (
+            <div className="mt-5">
+              <Field label="Words count">
+                <select
+                  value={wordCount}
+                  onChange={(e) => setWordCount(Number(e.target.value))}
+                  className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
+                >
+                  {[30, 50, 80, 120, 200, 400].map((n) => (
+                    <option key={n} value={n}>
+                      {n} words
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          )}
+
+          {mode === "audio" && (
+            <div className="mt-5">
+              <div className="flex items-center justify-between text-white/70 text-sm mb-1">
+                <span>Audio length</span>
+                <span>{audioSeconds}s</span>
               </div>
-              <div className="text-white/80 text-sm">Click to upload a reference image</div>
-              <div className="text-white/40 text-xs">PNG, JPG up to 10MB</div>
-              {file && <div className="text-xs text-white/60 mt-1">{file.name}</div>}
-            </label>
-          </div>
-
-          <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Category">
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value as Category)}
-                className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
-              >
-                {["Character", "Building", "Creature", "Prop"].map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </Field>
-
-            <Field label="Frame Count">
-              <select
-                value={frameCount}
-                onChange={(e) => setFrameCount(Number(e.target.value))}
-                className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
-              >
-                {[6, 8, 9, 12, 16, 24, 32].map((n) => (
-                  <option key={n} value={n}>
-                    {n} frames
-                  </option>
-                ))}
-              </select>
-            </Field>
-
-            <Field label="Style">
-              <select
-                value={style}
-                onChange={(e) => setStyle(e.target.value)}
-                className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
-              >
-                {["Pixel Art", "Game Boy", "PICO-8", "SNES"].map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </Field>
-
-            <Field label="Canvas Size">
-              <select
-                value={canvasSize}
-                onChange={(e) => setCanvasSize(e.target.value)}
-                className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
-              >
-                {["64x64", "96x96", "128x128", "256x256"].map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                value={audioSeconds}
+                onChange={(e) => setAudioSeconds(Number(e.target.value))}
+                className="w-full accent-pink-500"
+              />
+            </div>
+          )}
 
           <button
             onClick={onGenerate}
@@ -378,85 +501,70 @@ useEffect(() => {
             {isGenerating ? "GENERATING..." : "GENERATE"}
           </button>
 
-          <div className="text-white/40 text-xs mt-3">MVP: UI only (no AI yet)</div>
+          <div className="text-white/40 text-xs mt-3">MVP: modes (UI only)</div>
         </div>
 
         <div className="bg-[#0f131a] rounded-2xl p-6 border border-white/5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset,0_10px_30px_rgba(0,0,0,0.6)] flex flex-col">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2 text-white/80">
-              <button onClick={() => setIsPlaying((p) => !p)} className="chip">
-                {isPlaying ? "Pause" : "Play"}
-              </button>
-              <button onClick={() => setIsLoop((v) => !v)} className={"chip " + (isLoop ? "active" : "")}>
-                Loop
-              </button>
-              <button
-                onClick={() => {
-                  setIsPlaying(false);
-                  setCurrentFrame(0);
-                }}
-                className="chip"
-              >
-                Reset
-              </button>
-              <button onClick={() => setRemoveBg((v) => !v)} className={"chip " + (removeBg ? "active" : "")}>
-                Remove Background
-              </button>
-            </div>
-            <div className="text-xs text-white/50">
-              Frame {currentFrame + 1} of {frameCount}
-            </div>
-          </div>
+          {mode === "image" && (
+            <>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-white/80">
+                  <button onClick={() => setRemoveBg((v) => !v)} className={"chip " + (removeBg ? "active" : "")}>
+                    Remove Background
+                  </button>
+                  <button onClick={downloadImage} className="chip">Download PNG</button>
+                </div>
+              </div>
 
-          <div className={"rounded-2xl border border-white/10 w-full aspect-square overflow-hidden flex items-center justify-center " + (removeBg ? "checker" : "bg-[#0b0e13]")}>
-            <canvas ref={previewCanvasRef} />
-          </div>
+              <div className={"rounded-2xl border border-white/10 w-full aspect-square overflow-hidden flex items-center justify-center " + (removeBg ? "checker" : "bg-[#0b0e13]")}>
+                <canvas ref={previewCanvasRef} />
+              </div>
 
-          <div className="mt-4">
-            <div className="flex items-center justify-between text-white/70 text-sm mb-1">
-              <span>Animation Speed</span>
-              <span>{fps} FPS</span>
-            </div>
-            <input
-              type="range"
-              min={1}
-              max={30}
-              value={fps}
-              onChange={(e) => setFps(Number(e.target.value))}
-              className="w-full accent-pink-500"
-            />
-          </div>
+              {genError && <div className="mt-3 text-sm text-red-300">{genError}</div>}
+            </>
+          )}
 
-          <div className="mt-4">
-            <div className="text-pink-300 text-sm mb-2">Individual Frames</div>
-            <div className="grid grid-cols-5 gap-2">
-              {frames.map((i) => (
-                <button
-                  key={i}
-                  onClick={() => {
-                    setCurrentFrame(i);
-                    setIsPlaying(false);
-                  }}
-                  className={
-                    "relative rounded-xl border " +
-                    (currentFrame === i ? "border-pink-500" : "border-white/10") +
-                    " bg-[#0b0e13] aspect-square overflow-hidden"
-                  }
-                >
-                  <MiniFrame index={i} removeBg={removeBg} />
-                </button>
-              ))}
-            </div>
-          </div>
+          {mode === "text" && (
+            <>
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-white/85 font-medium">Generated Text</div>
+                <button onClick={downloadText} className="chip">Download TXT</button>
+              </div>
 
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <button onClick={downloadSpriteSheet} className="h-11 rounded-xl bg-white/10 hover:bg-white/15 transition">
-              Download Sprite Sheet
-            </button>
-            <button onClick={copyCss} className="h-11 rounded-xl bg-white/10 hover:bg-white/15 transition">
-              Copy CSS Animation
-            </button>
-          </div>
+              <div className="flex-1 rounded-2xl bg-[#0b0e13] border border-white/10 p-4 overflow-auto whitespace-pre-wrap text-white/85">
+                {textOut}
+              </div>
+            </>
+          )}
+
+          {mode === "audio" && (
+            <>
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-white/85 font-medium">Generated Audio</div>
+                <div className="flex items-center gap-2">
+                  <button onClick={audioPlayPause} className="chip">
+                    {audioRef.current && !audioRef.current.paused ? "Pause" : "Play"}
+                  </button>
+                  <button onClick={() => setIsLoop((v) => !v)} className={"chip " + (isLoop ? "active" : "")}>
+                    Loop
+                  </button>
+                  <button onClick={audioRestart} className="chip">Restart</button>
+                  <button onClick={audioDownload} className="chip">Download WAV</button>
+                </div>
+              </div>
+
+              <div className="flex-1 rounded-2xl bg-[#0b0e13] border border-white/10 p-4 flex items-center justify-center">
+                {!audioUrl ? (
+                  <div className="text-white/60">Нажми GENERATE, чтобы сгенерировать тестовый звук.</div>
+                ) : (
+                  <div className="w-full">
+                    <audio ref={audioRef} src={audioUrl} controls className="w-full" />
+                    <div className="text-xs text-white/50 mt-2">Test WAV: {audioSeconds}s</div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -472,40 +580,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function MiniFrame({ index, removeBg }: { index: number; removeBg: boolean }) {
-  const ref = React.useRef<HTMLCanvasElement | null>(null);
-  React.useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const ctx = el.getContext("2d");
-    if (!ctx) return;
-    const w = 72,
-      h = 72;
-    el.width = w;
-    el.height = h;
-    ctx.clearRect(0, 0, w, h);
-    ctx.imageSmoothingEnabled = false;
-    if (!removeBg) {
-      ctx.fillStyle = "#0b0e13";
-      ctx.fillRect(0, 0, w, h);
-    }
-    const px = 6;
-    const palette = ["#f472b6", "#fb7185", "#38bdf8", "#22c55e", "#a3a3a3"];
-    for (let y = 0; y < h; y += px) {
-      for (let x = 0; x < w; x += px) {
-        const k = ((x + y + index * 6) / px) % palette.length;
-        // @ts-ignore
-        ctx.fillStyle = palette[Math.floor(k)];
-        if (removeBg && (x < px || y < px || x > w - px * 2 || y > h - px * 2)) continue;
-        ctx.fillRect(x + (index % 3), y + ((index * 2) % 3), px - 1, px - 1);
-      }
-    }
-    ctx.strokeStyle = "#1e2632";
-    ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-  }, [index, removeBg]);
-  return <canvas ref={ref} className="w-full h-full" />;
-}
-
 function SparklesIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -517,13 +591,7 @@ function SparklesIcon() {
 function UploadIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path
-        d="M12 16V4m0 0l-4 4m4-4l4 4"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+      <path d="M12 16V4m0 0l-4 4m4-4l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M6 20h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   );

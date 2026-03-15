@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/loginregister.tsx","./src/spritesheetui.tsx","./src/api.ts","./src/auth.tsx","./src/main.tsx","./src/api/auth/auth.http.ts","./src/api/auth/auth.mock.ts","./src/api/auth/index.ts","./src/api/auth/types.ts","./src/api/jobs/index.ts","./src/api/jobs/jobs.http.ts","./src/api/jobs/types.ts"],"version":"5.9.3"}

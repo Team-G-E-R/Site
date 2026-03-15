@@ -51,7 +51,6 @@ export function createMockAuthApi() {
     async register(email: string, password: string, name: string): Promise<Me> {
       email = normEmail(email);
       name = name.trim();
-
       if (!email || !password || !name) throw new Error("Заполни все поля");
       if (password.length < 6) throw new Error("Пароль минимум 6 символов");
 
