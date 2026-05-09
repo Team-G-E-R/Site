@@ -1,26 +1,26 @@
-
 import React, { useMemo, useRef, useState, useEffect } from "react";
-import { useAuth } from "./auth";
-import { addHistoryEntry } from "./history";
+import { apiCreateJob, apiGetJob, apiGetJobArtifactBlob } from "./api/jobs";
 
 type Category = "Character" | "Building" | "Creature" | "Prop";
 type GenMode = "image" | "text" | "audio";
 
 function modeLabel(m: GenMode) {
   if (m === "text") return "Text";
-  if (m === "audio") return "Audio";
+  if (m === "audio") return "Music";
   return "Image";
 }
 
 function modeTitle(m: GenMode) {
   if (m === "text") return "Generate a text about...";
-  if (m === "audio") return "Generate an audio about...";
-  return "Generate an image about...";
+  if (m === "audio") return "Generate game music about...";
+  return "Generate a pixel animation about...";
 }
 
 function modePlaceholder(m: GenMode) {
-  if (m === "text") return "Например: короткое описание персонажа, лор, квест, диалоги...";
-  if (m === "audio") return "Например: удар меча, шаги, амбиент, музыкальный луп...";
+  if (m === "text")
+    return "Например: короткое описание персонажа, лор, квест, диалоги...";
+  if (m === "audio")
+    return "Например: battle theme, ambient dungeon loop, main menu theme, calm village music...";
   return "Например: knight run cycle, 16-bit, clean outlines";
 }
 
@@ -37,60 +37,7 @@ function makeTxtFile(text: string): Blob {
   return new Blob([text], { type: "text/plain;charset=utf-8" });
 }
 
-function generateLoremWords(count: number) {
-  const base = [
-    "sprite", "pixel", "hero", "village", "quest", "shadow", "castle", "forest", "magic", "iron",
-    "river", "ancient", "guardian", "silent", "storm", "gold", "path", "dream", "echo", "light"
-  ];
-  const words: string[] = [];
-  for (let i = 0; i < count; i++) words.push(base[i % base.length]);
-  const text = words.join(" ");
-  return text.charAt(0).toUpperCase() + text.slice(1) + ".";
-}
-
-// Simple WAV generator (mono 44.1kHz, 16-bit PCM)
-function generateTestWav(seconds = 2.0, freq = 440): Blob {
-  const sampleRate = 44100;
-  const numSamples = Math.floor(sampleRate * seconds);
-  const numChannels = 1;
-  const bitsPerSample = 16;
-
-  const buffer = new ArrayBuffer(44 + numSamples * 2);
-  const view = new DataView(buffer);
-
-  const writeString = (offset: number, s: string) => {
-    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
-  };
-
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + numSamples * 2, true);
-  writeString(8, "WAVE");
-
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
-  view.setUint16(32, numChannels * (bitsPerSample / 8), true);
-  view.setUint16(34, bitsPerSample, true);
-
-  writeString(36, "data");
-  view.setUint32(40, numSamples * 2, true);
-
-  const volume = 0.25;
-  for (let i = 0; i < numSamples; i++) {
-    const t = i / sampleRate;
-    const s = Math.sin(2 * Math.PI * freq * t) * volume;
-    const v = Math.max(-1, Math.min(1, s));
-    view.setInt16(44 + i * 2, Math.floor(v * 32767), true);
-  }
-
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
 export default function SpriteSheetUI() {
-  const { user } = useAuth();
   const [mode, setMode] = useState<GenMode>("image");
   const [modeOpen, setModeOpen] = useState(false);
 
@@ -112,13 +59,12 @@ export default function SpriteSheetUI() {
   // Text mode
   const [wordCount, setWordCount] = useState(80);
   const [textOut, setTextOut] = useState<string>(
-    "Нажми GENERATE, чтобы получить тестовый результат текста."
+    "Нажми GENERATE, чтобы получить тестовый результат текста.",
   );
 
   // Audio mode
-  const [audioSeconds, setAudioSeconds] = useState(2);
+  const [audioSeconds, setAudioSeconds] = useState(5);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const size = useMemo(() => {
@@ -126,9 +72,28 @@ export default function SpriteSheetUI() {
     return { w, h };
   }, [canvasSize]);
 
+  const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
+
+  const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function waitJob(jobId: string) {
+    for (let i = 0; i < 2400; i++) {
+      const job = await apiGetJob(jobId);
+      if (job.status === "failed")
+        throw new Error(job.error ?? "Generation failed");
+      if (job.status === "succeeded") return job;
+      await sleep(700);
+    }
+
+    throw new Error("Timeout waiting for job");
+  }
+
   const frames = useMemo(
     () => Array.from({ length: frameCount }, (_, i) => i),
-    [frameCount]
+    [frameCount],
   );
   const animTimer = useRef<number | null>(null);
 
@@ -145,7 +110,8 @@ export default function SpriteSheetUI() {
       while (acc >= frameDur) {
         setCurrentFrame((f) => {
           const nf = f + 1;
-          if (nf >= frameCount) return isLoop ? 0 : (setIsPlaying(false), frameCount - 1);
+          if (nf >= frameCount)
+            return isLoop ? 0 : (setIsPlaying(false), frameCount - 1);
           return nf;
         });
         acc -= frameDur;
@@ -160,13 +126,47 @@ export default function SpriteSheetUI() {
   }, [mode, isPlaying, fps, frameCount, isLoop]);
 
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const resultImgRef = useRef<HTMLImageElement | null>(null);
 
-  useEffect(() => {
+  const drawImagePlaceholder = (
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+  ) => {
+    const px = category === "Building" ? 10 : category === "Prop" ? 7 : 8;
+    const palette =
+      category === "Character"
+        ? ["#f472b6", "#fb7185", "#a78bfa", "#38bdf8", "#22c55e"]
+        : category === "Building"
+          ? ["#a3a3a3", "#737373", "#c084fc", "#f59e0b", "#60a5fa"]
+          : category === "Creature"
+            ? ["#22c55e", "#86efac", "#34d399", "#10b981", "#14b8a6"]
+            : ["#f59e0b", "#f97316", "#fb7185", "#38bdf8", "#a3a3a3"];
+
+    for (let y = 0; y < h; y += px) {
+      for (let x = 0; x < w; x += px) {
+        const k = ((x + y + currentFrame * 5) / px) % palette.length;
+        ctx.fillStyle = palette[Math.floor(k)];
+        if (removeBg && (x < px || y < px || x > w - px * 2 || y > h - px * 2))
+          continue;
+        ctx.fillRect(
+          x + (currentFrame % 3),
+          y + ((currentFrame * 2) % 3),
+          px - 1,
+          px - 1,
+        );
+      }
+    }
+  };
+
+  const redrawPreview = () => {
     if (mode !== "image") return;
+
     const el = previewCanvasRef.current;
     if (!el) return;
     const ctx = el.getContext("2d");
     if (!ctx) return;
+
     const { w, h } = size;
     el.width = w;
     el.height = h;
@@ -178,111 +178,197 @@ export default function SpriteSheetUI() {
       ctx.fillRect(0, 0, w, h);
     }
 
-    const px = category === "Building" ? 10 : category === "Prop" ? 7 : 8;
-    const palette =
-      category === "Character"
-        ? ["#f472b6", "#fb7185", "#a78bfa", "#38bdf8", "#22c55e"]
-        : category === "Building"
-        ? ["#a3a3a3", "#737373", "#c084fc", "#f59e0b", "#60a5fa"]
-        : category === "Creature"
-        ? ["#22c55e", "#86efac", "#34d399", "#10b981", "#14b8a6"]
-        : ["#f59e0b", "#f97316", "#fb7185", "#38bdf8", "#a3a3a3"];
-
-    for (let y = 0; y < h; y += px) {
-      for (let x = 0; x < w; x += px) {
-        const k = ((x + y + currentFrame * 5) / px) % palette.length;
-        // @ts-ignore
-        ctx.fillStyle = palette[Math.floor(k)];
-        if (removeBg && (x < px || y < px || x > w - px * 2 || y > h - px * 2)) continue;
-        ctx.fillRect(
-          x + (currentFrame % 3),
-          y + ((currentFrame * 2) % 3),
-          px - 1,
-          px - 1
-        );
-      }
+    const img = resultImgRef.current;
+    if (img) {
+      ctx.drawImage(img, 0, 0, w, h);
+    } else {
+      drawImagePlaceholder(ctx, w, h);
     }
 
     ctx.strokeStyle = "#2e2e2e";
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-  }, [mode, size, currentFrame, removeBg, category]);
+  };
 
-const handleGenerate = () => {
-  if (mode === "image") {
-    setIsPlaying(false);
-    setCurrentFrame((f) => (f + 1) % frameCount);
+  useEffect(() => {
+    redrawPreview();
+  }, [mode, size, currentFrame, removeBg, category, resultUrl]);
 
-    if (user?.id) {
-      requestAnimationFrame(() => {
-        const c = previewCanvasRef.current;
-        if (!c) return;
-        try {
-          const dataUrl = c.toDataURL("image/png");
-          addHistoryEntry({
-            userId: user.id,
-            kind: "image",
-            prompt,
-            payload: { dataUrl, width: c.width, height: c.height },
-          });
-        } catch {}
-      });
-    }
-    return;
-  }
+  useEffect(() => {
+    resultImgRef.current = null;
 
-  if (mode === "text") {
-    const text = generateLoremWords(wordCount);
-    const block = [
-      "MODE: TEXT",
-      `Words: ${wordCount}`,
-      "",
-      "Prompt:",
-      `${prompt || "(empty)"}`,
-      "",
-      "Result:",
-      text,
-    ].join("\n");
-
-    setTextOut(block);
-
-    if (user?.id) {
-      addHistoryEntry({
-        userId: user.id,
-        kind: "text",
-        prompt,
-        payload: { text: block, wordCount },
-      });
-    }
-    return;
-  }
-
-  if (mode === "audio") {
-    const wav = generateTestWav(audioSeconds, 440);
-    const url = URL.createObjectURL(wav);
-    if (audioUrl) URL.revokeObjectURL(audioUrl);
-    setAudioUrl(url);
-
-    if (user?.id) {
-      addHistoryEntry({
-        userId: user.id,
-        kind: "audio",
-        prompt,
-        payload: { seconds: audioSeconds },
-      });
+    if (!resultUrl) {
+      redrawPreview();
+      return;
     }
 
-    setTimeout(() => {
-      const a = audioRef.current;
-      if (a) {
-        a.currentTime = 0;
-        a.loop = isLoop;
-        a.play().catch(() => {});
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      resultImgRef.current = img;
+      redrawPreview();
+    };
+    img.src = resultUrl;
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resultUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (resultUrl?.startsWith("blob:")) URL.revokeObjectURL(resultUrl);
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+    };
+  }, [resultUrl, audioUrl]);
+
+  const onGenerate = async () => {
+    if (mode === "text") {
+      const cleanPrompt = prompt.trim();
+
+      if (!cleanPrompt) {
+        setGenError("Введите prompt для генерации текста.");
+        return;
       }
-    }, 0);
-  }
-};
 
-useEffect(() => {
+      setGenError(null);
+      setIsGenerating(true);
+      setTextOut("Генерация текста...");
+
+      try {
+        const created = await apiCreateJob({
+          type: "text",
+          params: {
+            prompt: cleanPrompt,
+            text_kind: "other",
+            language: "ru",
+            word_count: wordCount,
+          },
+        });
+
+        const jobId = String(created.job_id);
+        const done = await waitJob(jobId);
+        const textRel =
+          done.result?.artifacts?.text ??
+          done.result?.artifacts?.result ??
+          "out/result.txt";
+
+        const blob = await apiGetJobArtifactBlob(jobId, textRel);
+        const generatedText = await blob.text();
+
+        setTextOut(generatedText);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setGenError(message);
+        setTextOut(`Ошибка генерации текста:\n${message}`);
+      } finally {
+        setIsGenerating(false);
+      }
+
+      return;
+    }
+
+    if (mode === "audio") {
+      const cleanPrompt = prompt.trim();
+
+      if (!cleanPrompt) {
+        setGenError("Введите prompt для генерации музыки.");
+        return;
+      }
+
+      setGenError(null);
+      setIsGenerating(true);
+
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+        setAudioUrl(null);
+      }
+
+      try {
+        const created = await apiCreateJob({
+          type: "sound",
+          params: {
+            prompt: cleanPrompt,
+            audio_kind: "music",
+            duration_seconds: audioSeconds,
+            sample_rate: 44100,
+          },
+        });
+
+        const jobId = String(created.job_id);
+        const done = await waitJob(jobId);
+        const audioRel =
+          done.result?.artifacts?.audio ??
+          done.result?.artifacts?.wav ??
+          done.result?.artifacts?.result ??
+          "out/result.wav";
+
+        const blob = await apiGetJobArtifactBlob(jobId, audioRel);
+        const url = URL.createObjectURL(blob);
+        setAudioUrl(url);
+
+        setTimeout(() => {
+          const audio = audioRef.current;
+          if (audio) {
+            audio.currentTime = 0;
+            audio.loop = isLoop;
+            audio.play().catch(() => {});
+          }
+        }, 0);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setGenError(message);
+      } finally {
+        setIsGenerating(false);
+      }
+
+      return;
+    }
+
+    setGenError(null);
+    setIsGenerating(true);
+    setIsPlaying(false);
+    setCurrentFrame(0);
+
+    setResultUrl((prev) => {
+      if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
+      return null;
+    });
+    resultImgRef.current = null;
+
+    try {
+      const created = await apiCreateJob({
+        type: "icon",
+        params: { prompt, size: size.w },
+      });
+
+      const jobId = String(created.job_id);
+      const done = await waitJob(jobId);
+      const imageRel = done.result?.artifacts?.image;
+
+      if (!imageRel) throw new Error("No image artifact");
+
+      const blob = await apiGetJobArtifactBlob(jobId, imageRel);
+      const url = URL.createObjectURL(blob);
+      setResultUrl(url);
+    } catch (e) {
+      setGenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const downloadImage = () => {
+    const el = previewCanvasRef.current;
+    if (!el) return;
+
+    el.toBlob((blob) => {
+      if (!blob) return;
+      downloadBlob(blob, "image.png");
+    });
+  };
+
+  useEffect(() => {
     if (!modeOpen) return;
     const onDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null;
@@ -296,11 +382,11 @@ useEffect(() => {
 
   const switchMode = (m: GenMode) => {
     setMode(m);
-    setIsAudioPlaying(false);
     setModeOpen(false);
 
     setIsPlaying(false);
     setCurrentFrame(0);
+    setGenError(null);
 
     if (m !== "audio" && audioUrl) {
       URL.revokeObjectURL(audioUrl);
@@ -308,31 +394,14 @@ useEffect(() => {
     }
   };
 
-  const downloadImage = () => {
-  const el = previewCanvasRef.current;
-  if (!el) return;
-  el.toBlob((blob) => {
-    if (!blob) return;
-    downloadBlob(blob, "image.png");
-  });
-};
-
   const downloadText = () => downloadBlob(makeTxtFile(textOut), "result.txt");
 
-const audioPlayStop = () => {
-  const a = audioRef.current;
-  if (!a) return;
-
-  if (!a.paused && !a.ended) {
-    a.pause();
-    a.currentTime = 0;
-    return;
-  }
-
-  a.currentTime = 0;
-  a.play().catch(() => {});
-};
-
+  const audioPlayPause = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) a.play().catch(() => {});
+    else a.pause();
+  };
 
   const audioRestart = () => {
     const a = audioRef.current;
@@ -345,7 +414,7 @@ const audioPlayStop = () => {
     if (!audioUrl) return;
     const res = await fetch(audioUrl);
     const blob = await res.blob();
-    downloadBlob(blob, "test.wav");
+    downloadBlob(blob, "result.wav");
   };
 
   useEffect(() => {
@@ -355,10 +424,10 @@ const audioPlayStop = () => {
   }, [isLoop, audioUrl]);
 
   return (
-    <div className="h-full w-full bg-[#0b0e13] text-white overflow-hidden">
-      <div className="w-full h-full max-w-none grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+    <div className="min-h-screen w-full bg-[#0b0e13] text-white flex items-stretch justify-center p-4 md:p-8">
+      <div className="w-full max-w-none grid grid-cols-1 md:grid-cols-2 gap-8">
         {/* LEFT */}
-        <div className="bg-[#0f131a] rounded-2xl p-6 border border-white/5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset,0_10px_30px_rgba(0,0,0,0.6)] self-start">
+        <div className="bg-[#0f131a] rounded-2xl p-6 border border-white/5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset,0_10px_30px_rgba(0,0,0,0.6)]">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2 text-pink-300">
               <SparklesIcon />
@@ -379,28 +448,43 @@ const audioPlayStop = () => {
               {modeOpen && (
                 <div className="absolute right-0 mt-2 w-56 rounded-xl border border-white/10 bg-[#0b0e13] shadow-[0_10px_30px_rgba(0,0,0,0.6)] overflow-hidden">
                   <button
-                    className={"w-full text-left px-3 py-2 hover:bg-white/10 " + (mode === "image" ? "text-pink-300" : "text-white/85")}
+                    className={
+                      "w-full text-left px-3 py-2 hover:bg-white/10 " +
+                      (mode === "image" ? "text-pink-300" : "text-white/85")
+                    }
                     onClick={() => switchMode("image")}
                     type="button"
                   >
                     Image
-                    <div className="text-[11px] text-white/50 mt-0.5">Pixel image / sprites preview</div>
+                    <div className="text-[11px] text-white/50 mt-0.5">
+                      Pixel image / sprites preview
+                    </div>
                   </button>
                   <button
-                    className={"w-full text-left px-3 py-2 hover:bg-white/10 " + (mode === "text" ? "text-pink-300" : "text-white/85")}
+                    className={
+                      "w-full text-left px-3 py-2 hover:bg-white/10 " +
+                      (mode === "text" ? "text-pink-300" : "text-white/85")
+                    }
                     onClick={() => switchMode("text")}
                     type="button"
                   >
                     Text
-                    <div className="text-[11px] text-white/50 mt-0.5">Generate text + download TXT</div>
+                    <div className="text-[11px] text-white/50 mt-0.5">
+                      Generate text + download TXT
+                    </div>
                   </button>
                   <button
-                    className={"w-full text-left px-3 py-2 hover:bg-white/10 " + (mode === "audio" ? "text-pink-300" : "text-white/85")}
+                    className={
+                      "w-full text-left px-3 py-2 hover:bg-white/10 " +
+                      (mode === "audio" ? "text-pink-300" : "text-white/85")
+                    }
                     onClick={() => switchMode("audio")}
                     type="button"
                   >
                     Audio
-                    <div className="text-[11px] text-white/50 mt-0.5">Generate audio + download WAV</div>
+                    <div className="text-[11px] text-white/50 mt-0.5">
+                      Generate game music + download WAV
+                    </div>
                   </button>
                 </div>
               )}
@@ -427,9 +511,13 @@ const audioPlayStop = () => {
                 <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center">
                   <UploadIcon />
                 </div>
-                <div className="text-white/80 text-sm">Click to upload a reference image</div>
+                <div className="text-white/80 text-sm">
+                  Click to upload a reference image
+                </div>
                 <div className="text-white/40 text-xs">PNG, JPG up to 10MB</div>
-                {file && <div className="text-xs text-white/60 mt-1">{file.name}</div>}
+                {file && (
+                  <div className="text-xs text-white/60 mt-1">{file.name}</div>
+                )}
               </label>
             </div>
           )}
@@ -489,7 +577,7 @@ const audioPlayStop = () => {
                   onChange={(e) => setWordCount(Number(e.target.value))}
                   className="w-full bg-[#0b0e13] border border-white/10 rounded-lg px-3 py-2 focus:border-pink-500/70 outline-none"
                 >
-                  {[30, 50, 80, 120, 200, 400].map((n) => (
+                  {[30, 50, 80, 120, 200, 300].map((n) => (
                     <option key={n} value={n}>
                       {n} words
                     </option>
@@ -502,13 +590,14 @@ const audioPlayStop = () => {
           {mode === "audio" && (
             <div className="mt-5">
               <div className="flex items-center justify-between text-white/70 text-sm mb-1">
-                <span>Audio length</span>
+                <span>Track length</span>
                 <span>{audioSeconds}s</span>
               </div>
               <input
                 type="range"
-                min={1}
-                max={10}
+                min={5}
+                max={160}
+                step={5}
                 value={audioSeconds}
                 onChange={(e) => setAudioSeconds(Number(e.target.value))}
                 className="w-full accent-pink-500"
@@ -517,42 +606,91 @@ const audioPlayStop = () => {
           )}
 
           <button
-            onClick={handleGenerate}
-            className="mt-6 w-full h-11 rounded-xl bg-pink-600/80 hover:bg-pink-500 transition text-white font-medium tracking-wide"
+            onClick={onGenerate}
+            disabled={isGenerating}
+            className="mt-6 w-full h-11 rounded-xl bg-pink-600/80 hover:bg-pink-500 disabled:opacity-50 transition text-white font-medium tracking-wide"
           >
-            GENERATE
+            {isGenerating ? "GENERATING..." : "GENERATE"}
           </button>
 
-          <div className="text-white/40 text-xs mt-3">MVP: modes (UI only)</div>
+          {genError && (
+            <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              {genError}
+            </div>
+          )}
+
+          <div className="text-white/40 text-xs mt-3">
+            MVP: image/text/music use backend jobs
+          </div>
         </div>
 
         {/* RIGHT */}
-        <div className={"bg-[#0f131a] rounded-2xl p-6 border border-white/5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset,0_10px_30px_rgba(0,0,0,0.6)] flex flex-col " + (mode === "audio" ? "self-start" : "h-full min-h-0")}>
+        <div className="bg-[#0f131a] rounded-2xl p-6 border border-white/5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset,0_10px_30px_rgba(0,0,0,0.6)] flex flex-col">
           {mode === "image" && (
-  <>
-    <div className="flex items-center justify-between mb-3">
-      <div className="flex items-center gap-2 text-white/80">
-        <button onClick={() => setRemoveBg((v) => !v)} className={"chip " + (removeBg ? "active" : "")}>
-          Remove Background
-        </button>
-        <button onClick={downloadImage} className="chip">Download PNG</button>
-      </div>
-    </div>
+            <>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-white/80">
+                  <button
+                    onClick={() => setIsPlaying((p) => !p)}
+                    className="chip"
+                  >
+                    {isPlaying ? "Pause" : "Play"}
+                  </button>
+                  <button
+                    onClick={() => setIsLoop((v) => !v)}
+                    className={"chip " + (isLoop ? "active" : "")}
+                  >
+                    Loop
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsPlaying(false);
+                      setCurrentFrame(0);
+                    }}
+                    className="chip"
+                  >
+                    Reset
+                  </button>
+                  <button
+                    onClick={() => setRemoveBg((v) => !v)}
+                    className={"chip " + (removeBg ? "active" : "")}
+                  >
+                    Remove Background
+                  </button>
+                  <button onClick={downloadImage} className="chip">
+                    Download PNG
+                  </button>
+                </div>
+                <div className="text-xs text-white/50">
+                  Frame {currentFrame + 1} of {frameCount}
+                </div>
+              </div>
 
-    <div className={"rounded-2xl border border-white/10 w-full aspect-square overflow-hidden flex items-center justify-center " + (removeBg ? "checker" : "bg-[#0b0e13]")}>
-      <canvas ref={previewCanvasRef} />
-    </div>
-  </>
-)}
+              <div
+                className={
+                  "rounded-2xl border border-white/10 w-full aspect-square overflow-hidden flex items-center justify-center " +
+                  (removeBg ? "checker" : "bg-[#0b0e13]")
+                }
+              >
+                <canvas ref={previewCanvasRef} />
+              </div>
 
-{mode === "text" && (
+              {genError && (
+                <div className="mt-3 text-sm text-red-300">{genError}</div>
+              )}
+            </>
+          )}
+
+          {mode === "text" && (
             <>
               <div className="flex items-center justify-between mb-3">
                 <div className="text-white/85 font-medium">Generated Text</div>
-                <button onClick={downloadText} className="chip">Download TXT</button>
+                <button onClick={downloadText} className="chip">
+                  Download TXT
+                </button>
               </div>
 
-              <div className="flex-1 min-h-0 rounded-2xl bg-[#0b0e13] border border-white/10 p-4 overflow-auto whitespace-pre-wrap break-words text-white/85">
+              <div className="flex-1 rounded-2xl bg-[#0b0e13] border border-white/10 p-4 overflow-auto whitespace-pre-wrap text-white/85">
                 {textOut}
               </div>
             </>
@@ -561,26 +699,44 @@ const audioPlayStop = () => {
           {mode === "audio" && (
             <>
               <div className="flex items-center justify-between mb-3">
-                <div className="text-white/85 font-medium">Generated Audio</div>
+                <div className="text-white/85 font-medium">Generated Music</div>
                 <div className="flex items-center gap-2">
-                  <button onClick={audioPlayStop} className="chip">
-                    {isAudioPlaying ? "Stop" : "Play"}
+                  <button onClick={audioPlayPause} className="chip">
+                    {audioRef.current && !audioRef.current.paused
+                      ? "Pause"
+                      : "Play"}
                   </button>
-                  <button onClick={() => setIsLoop((v) => !v)} className={"chip " + (isLoop ? "active" : "")}>
+                  <button
+                    onClick={() => setIsLoop((v) => !v)}
+                    className={"chip " + (isLoop ? "active" : "")}
+                  >
                     Loop
                   </button>
-                  <button onClick={audioRestart} className="chip">Restart</button>
-                  <button onClick={audioDownload} className="chip">Download WAV</button>
+                  <button onClick={audioRestart} className="chip">
+                    Restart
+                  </button>
+                  <button onClick={audioDownload} className="chip">
+                    Download WAV
+                  </button>
                 </div>
               </div>
 
-              <div className="rounded-2xl bg-[#0b0e13] border border-white/10 p-4 h-40 flex items-center justify-center">
+              <div className="flex-1 rounded-2xl bg-[#0b0e13] border border-white/10 p-4 flex items-center justify-center">
                 {!audioUrl ? (
-                  <div className="text-white/60">Нажми GENERATE, чтобы сгенерировать тестовый звук.</div>
+                  <div className="text-white/60">
+                    Нажми GENERATE, чтобы сгенерировать музыкальный трек через backend job.
+                  </div>
                 ) : (
                   <div className="w-full">
-                    <audio ref={audioRef} src={audioUrl} controls className="w-full" onPlay={() => setIsAudioPlaying(true)} onPause={() => setIsAudioPlaying(false)} onEnded={() => setIsAudioPlaying(false)} />
-                    <div className="text-xs text-white/50 mt-2">Test WAV: {audioSeconds}s</div>
+                    <audio
+                      ref={audioRef}
+                      src={audioUrl}
+                      controls
+                      className="w-full"
+                    />
+                    <div className="text-xs text-white/50 mt-2">
+                      Generated music WAV: {audioSeconds}s
+                    </div>
                   </div>
                 )}
               </div>
@@ -592,7 +748,13 @@ const audioPlayStop = () => {
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-1">
       <div className="text-white/70 text-sm">{label}</div>
@@ -603,7 +765,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function SparklesIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
       <path d="M12 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5z" fill="#f472b6" />
     </svg>
   );
@@ -611,9 +779,26 @@ function SparklesIcon() {
 
 function UploadIcon() {
   return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M12 16V4m0 0l-4 4m4-4l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M6 20h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M12 16V4m0 0l-4 4m4-4l4 4"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M6 20h12"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }

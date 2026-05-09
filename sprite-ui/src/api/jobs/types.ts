@@ -14,4 +14,6 @@ export type JobResponse = {
   params: Record<string, any>;
   result: Record<string, any> | null;
   error: string | null;
+  created_at: string;
+  updated_at: string;
 };

@@ -10,7 +10,13 @@ export function getBackendMode(): AuthBackendMode {
 }
 
 export function getApiBase(): string {
-  return (import.meta.env.VITE_API_BASE || 'http://localhost:4000') as string;
+  const value = import.meta.env.VITE_API_BASE;
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  return '';
 }
 
 const mode = getBackendMode();
