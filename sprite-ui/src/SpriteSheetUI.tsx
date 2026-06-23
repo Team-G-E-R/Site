@@ -13,7 +13,7 @@ function modeLabel(m: GenMode) {
 function modeTitle(m: GenMode) {
   if (m === "text") return "Generate a text about...";
   if (m === "audio") return "Generate game music about...";
-  return "Generate a pixel animation about...";
+  return "Generate an image about...";
 }
 
 function modePlaceholder(m: GenMode) {
@@ -21,7 +21,7 @@ function modePlaceholder(m: GenMode) {
     return "Например: короткое описание персонажа, лор, квест, диалоги...";
   if (m === "audio")
     return "Например: battle theme, ambient dungeon loop, main menu theme, calm village music...";
-  return "Например: knight run cycle, 16-bit, clean outlines";
+  return "Например: knight, 16-bit, clean outlines";
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -48,12 +48,8 @@ export default function SpriteSheetUI() {
   const [style, setStyle] = useState("Pixel Art");
   const [canvasSize, setCanvasSize] = useState("128x128");
 
-  // Image mode (fixed frames, no selector in UI)
-  const frameCount = 9;
-  const [fps, setFps] = useState(10);
-  const [isPlaying, setIsPlaying] = useState(false);
+  // Image mode
   const [isLoop, setIsLoop] = useState(true);
-  const [currentFrame, setCurrentFrame] = useState(0);
   const [removeBg, setRemoveBg] = useState(false);
 
   // Text mode
@@ -91,40 +87,6 @@ export default function SpriteSheetUI() {
     throw new Error("Timeout waiting for job");
   }
 
-  const frames = useMemo(
-    () => Array.from({ length: frameCount }, (_, i) => i),
-    [frameCount],
-  );
-  const animTimer = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (mode !== "image") return;
-    if (!isPlaying) return;
-    if (animTimer.current) cancelAnimationFrame(animTimer.current);
-    let acc = 0;
-    let last = performance.now();
-    const frameDur = 1000 / fps;
-    const tick = (t: number) => {
-      acc += t - last;
-      last = t;
-      while (acc >= frameDur) {
-        setCurrentFrame((f) => {
-          const nf = f + 1;
-          if (nf >= frameCount)
-            return isLoop ? 0 : (setIsPlaying(false), frameCount - 1);
-          return nf;
-        });
-        acc -= frameDur;
-      }
-      if (isPlaying) animTimer.current = requestAnimationFrame(tick);
-    };
-    animTimer.current = requestAnimationFrame(tick);
-    return () => {
-      if (animTimer.current) cancelAnimationFrame(animTimer.current);
-      animTimer.current = null;
-    };
-  }, [mode, isPlaying, fps, frameCount, isLoop]);
-
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const resultImgRef = useRef<HTMLImageElement | null>(null);
 
@@ -145,16 +107,11 @@ export default function SpriteSheetUI() {
 
     for (let y = 0; y < h; y += px) {
       for (let x = 0; x < w; x += px) {
-        const k = ((x + y + currentFrame * 5) / px) % palette.length;
+        const k = ((x + y) / px) % palette.length;
         ctx.fillStyle = palette[Math.floor(k)];
         if (removeBg && (x < px || y < px || x > w - px * 2 || y > h - px * 2))
           continue;
-        ctx.fillRect(
-          x + (currentFrame % 3),
-          y + ((currentFrame * 2) % 3),
-          px - 1,
-          px - 1,
-        );
+        ctx.fillRect(x, y, px - 1, px - 1);
       }
     }
   };
@@ -191,7 +148,7 @@ export default function SpriteSheetUI() {
 
   useEffect(() => {
     redrawPreview();
-  }, [mode, size, currentFrame, removeBg, category, resultUrl]);
+  }, [mode, size, removeBg, category, resultUrl]);
 
   useEffect(() => {
     resultImgRef.current = null;
@@ -327,8 +284,6 @@ export default function SpriteSheetUI() {
 
     setGenError(null);
     setIsGenerating(true);
-    setIsPlaying(false);
-    setCurrentFrame(0);
 
     setResultUrl((prev) => {
       if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
@@ -384,8 +339,6 @@ export default function SpriteSheetUI() {
     setMode(m);
     setModeOpen(false);
 
-    setIsPlaying(false);
-    setCurrentFrame(0);
     setGenError(null);
 
     if (m !== "audio" && audioUrl) {
@@ -618,52 +571,22 @@ export default function SpriteSheetUI() {
               {genError}
             </div>
           )}
-
-          <div className="text-white/40 text-xs mt-3">
-            MVP: image/text/music use backend jobs
-          </div>
         </div>
 
         {/* RIGHT */}
         <div className="bg-[#0f131a] rounded-2xl p-6 border border-white/5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset,0_10px_30px_rgba(0,0,0,0.6)] flex flex-col">
           {mode === "image" && (
             <>
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2 text-white/80">
-                  <button
-                    onClick={() => setIsPlaying((p) => !p)}
-                    className="chip"
-                  >
-                    {isPlaying ? "Pause" : "Play"}
-                  </button>
-                  <button
-                    onClick={() => setIsLoop((v) => !v)}
-                    className={"chip " + (isLoop ? "active" : "")}
-                  >
-                    Loop
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsPlaying(false);
-                      setCurrentFrame(0);
-                    }}
-                    className="chip"
-                  >
-                    Reset
-                  </button>
-                  <button
-                    onClick={() => setRemoveBg((v) => !v)}
-                    className={"chip " + (removeBg ? "active" : "")}
-                  >
-                    Remove Background
-                  </button>
-                  <button onClick={downloadImage} className="chip">
-                    Download PNG
-                  </button>
-                </div>
-                <div className="text-xs text-white/50">
-                  Frame {currentFrame + 1} of {frameCount}
-                </div>
+              <div className="flex items-center gap-2 mb-3 text-white/80">
+                <button
+                  onClick={() => setRemoveBg((v) => !v)}
+                  className={"chip " + (removeBg ? "active" : "")}
+                >
+                  Remove Background
+                </button>
+                <button onClick={downloadImage} className="chip">
+                  Download PNG
+                </button>
               </div>
 
               <div
